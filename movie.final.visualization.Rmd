@@ -1,0 +1,389 @@
+---
+title: "TMDB box office prediction-Text mining process and more EDA"
+author: "Mianchun Lu, Yuting Gong, Cijun Sun, Guangxu Luo"
+date: "April 19, 2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+libraries
+```{r, message=FALSE, warning=FALSE}
+#Sys.setenv(JAVA_HOME='C:/Program Files/Java/jdk-11.0.2')
+library(rJava)
+library(qdap)
+library(gtools)
+library(tidytext)
+library(tm)
+library(stringr)
+library(syuzhet)
+library(dplyr)
+library(gridExtra)
+library(wordcloud)
+library(xgboost)
+library(readr)
+library(stringr)
+library(caret)
+library(car)
+library(gbm)          # basic implementation
+library(ggplot2)      # model visualization
+library(tidyr)
+library(plyr)
+library(randomForest)
+library(cluster)
+```
+
+I load the datasets cleaned in the Deliverable 1. The main purpose of the following code is to do the text mining of the variables that have not been processed before(e.g. overview, keywords). Besides, I also calculate the log of budget and revenue to minimize the error caused by the high variance.
+```{r,message=FALSE}
+setwd('D:/personal/columbia university/AA method 2/final project/tmdb-box-office-prediction')
+train=read.csv("train_clean.csv", stringsAsFactors = FALSE, na.strings = c("","#N/A","[]"))
+test=read.csv("test_clean.csv", stringsAsFactors = FALSE,na.strings = c("","#N/A","[]"))
+```
+
+##variable: Keywords
+new variable: the number of keywords
+```{r,message=FALSE}
+keywordsCount_train <- str_count(train$Keywords, "\\}")  
+train$numberOfKeywords <- keywordsCount_train
+train$numberOfKeywords[is.na(train$Keywords)] <- 0
+keywordsCount_test <- str_count(test$Keywords, "\\}")  # each Keyword is followed by a "}"
+test$numberOfKeywords <- keywordsCount_test
+test$numberOfKeywords[is.na(test$Keywords)] <- 0
+```
+
+##Log Revenue
+convert budget and revenue to log
+```{r,message=FALSE}
+train$log.budget=log(train$budget+1)
+train$log.revenue=log(train$revenue+1)
+test$log.budget=log(test$budget+1)
+```
+
+#text mining
+## Data Preparation One
+Firstly, I counted the overview length in words and in sentences seperately.
+```{r,message=FALSE}
+# in words
+train$overviewLengthInWords=str_count(string = train$overview,pattern = '\\S+')
+test$overviewLengthInWords=str_count(string = test$overview,pattern = '\\S+')
+
+# in sentence
+train$overviewLengthInSentence=str_count(string = train$overview,
+                                         pattern = "[A-Za-z,;'\"\\s]+[^.!?]*[.?!]")
+test$overviewLengthInSentence=str_count(string = test$overview,
+                                        pattern = "[A-Za-z,;'\"\\s]+[^.!?]*[.?!]")
+
+# For overview, there are 0 missing value in the train data and test data.
+sum(is.na(train$overview))
+sum(is.na(test$overview))
+
+# let's see the coorelation between the revenue and these two new variables
+cor(train$revenue,train$overviewLengthInWords)
+cor(train$overviewLengthInSentence,train$revenue)
+```
+
+Let's use qdap package to have a look at the words appeared in the overview frequently.
+(An interesting thing is that the following result has a little difference with the xdtm)
+```{r,message=FALSE}
+overview.all=smartbind(train,test)
+freq_terms(text.var=overview.all$overview,top=25,stopwords = Top100Words)
+```
+
+Then, I counted the number of positive and negative words in every row with the help of "nrc", which can represent the sentiment level of each review. I also did the same work to test data.
+```{r,message=FALSE}
+df = data.frame()
+df.new = data.frame()
+library(syuzhet)
+for (i in 1:nrow(train))
+  {
+  sentiment1 <- get_nrc_sentiment(train$overview[i])
+  p1 = sum(sentiment1$positive)
+  n1 = sum(sentiment1$negative)
+  anger1=sum(sentiment1$anger)
+  anticipation1=sum(sentiment1$anticipation)
+  disgust1=sum(sentiment1$disgust)
+  fear1=sum(sentiment1$fear)
+  joy1=sum(sentiment1$joy)
+  sadness1=sum(sentiment1$sadness)
+  surprise1=sum(sentiment1$surprise)
+  trust1=sum(sentiment1$trust)
+  df.new = cbind(p1,n1,anger1,anticipation1,disgust1,fear1,joy1,sadness1,surprise1,trust1)
+  df = rbind(df,df.new)
+}
+
+train= cbind(train,df)
+```
+
+```{r}
+df = data.frame()
+df.new = data.frame()
+for (i in 1:nrow(test))
+  {
+  sentiment1 <- get_nrc_sentiment(test$overview[i])
+  p1 = sum(sentiment1$positive)
+  n1 = sum(sentiment1$negative)
+  anger1=sum(sentiment1$anger)
+  anticipation1=sum(sentiment1$anticipation)
+  disgust1=sum(sentiment1$disgust)
+  fear1=sum(sentiment1$fear)
+  joy1=sum(sentiment1$joy)
+  sadness1=sum(sentiment1$sadness)
+  surprise1=sum(sentiment1$surprise)
+  trust1=sum(sentiment1$trust)
+  df.new = cbind(p1,n1,anger1,anticipation1,disgust1,fear1,joy1,sadness1,surprise1,trust1)
+  df = rbind(df,df.new)
+}
+
+test= cbind(test,df)
+```
+
+## Sentiment Analysis One
+```{r}
+#sentiment analysis: p1, n1, anger1, etc
+senti_plot<-function(senti, label){
+  ggplot(data=train, aes(x = senti,
+             y = revenue, fill=senti,
+             stat = "summary", fun.y = "mean")) +
+  geom_bar(stat = "identity") +
+  theme_light() +
+  xlab(label) +
+  ylab("Average Revenue")
+}
+
+#for nrc
+p01<-senti_plot(train$p1,"p1")
+p2<-senti_plot(train$n1,"n1")
+p3<-senti_plot(train$anger1,"anger1")
+p4<-senti_plot(train$anticipation1,"anticipation1")
+p5<-senti_plot(train$disgust1,"disgust1")
+p6<-senti_plot(train$fear1,"fear1")
+p7<-senti_plot(train$joy1,"joy1")
+p8<-senti_plot(train$sadness1,"sadness1")
+p9<-senti_plot(train$surprise1,"surprise1")
+p10<-senti_plot(train$trust1,"trust1")
+grid.arrange(p01,p2,nrow=2)
+grid.arrange(p3,p4,nrow=2)
+grid.arrange(p5,p6,nrow=2)
+grid.arrange(p7,p8,nrow=2)
+grid.arrange(p9,p10,nrow=2)
+```
+
+## Data Preparation Two
+Then, let's try "afinn" lexicon, which scores the sentiment of words.
+(In this part, we faced with a problem that if all of the words in an overview do not belong to afinn lexion, then it will be deleted from the sentiment=mean(score), which means we cannot bind the ungrouped sentiment with original data. Our solution is to write a for loop and keep every records in a dataframe.)
+```{r message=FALSE}
+# train data
+df1 = data.frame()
+df.new1 = data.frame()
+for (i in 1:nrow(train)){
+  senti<-train[i,] %>%
+    select(overview)%>%
+    unnest_tokens(output=word,input=overview)%>%
+    inner_join(get_sentiments('afinn'))
+  sum1=sum(senti$score)
+  mean1=mean(senti$score)
+  df.new1=cbind(sum1,mean1)
+  df1=rbind(df1,df.new1)
+}
+
+train=cbind(train,df1)
+
+# test data
+df1 = data.frame()
+df.new1 = data.frame()
+for (i in 1:nrow(test)){
+  senti<-test[i,] %>%
+    select(overview)%>%
+    unnest_tokens(output=word,input=overview)%>%
+    inner_join(get_sentiments('afinn'))
+  sum1=sum(senti$score)
+  mean1=mean(senti$score)
+  df.new1=cbind(sum1,mean1)
+  df1=rbind(df1,df.new1)
+}
+
+test=cbind(test,df1)
+```
+
+##Sentiment Analysis Two
+I draw 12 charts(10 charts above) with the sentiment related variables in order to find out the relationship between them and revenue, which is the explanatory variable.
+The charts show that the overviews of movies with high revenue tend to include less sentimental words. The emotion of their overview is relatively neutral. 
+```{r}
+#for afinn
+senti_plot(train$sum1,"sum1")
+
+ggplot(data=train, aes(x = mean1,y = revenue, color=mean1,
+             stat = "summary", fun.y = "mean")) +
+  geom_point()+
+  theme_light() +
+  xlab("mean1") +
+  ylab("Average Revenue")
+```
+
+##Data Preparation Three
+An important step is to create a corpus which contains all the overviews of train and test. Then, I will find out the words appear most frequently in the overall dataset.
+```{r}
+#create a corpus
+corpus = Corpus(VectorSource(overview.all$overview))
+#convert to lower case
+corpus = tm_map(corpus,FUN = content_transformer(tolower))
+#remove puntuation
+corpus = tm_map(corpus,FUN=removePunctuation)
+#Remove stopwords
+corpus = tm_map(corpus, FUN=removeWords, c(stopwords('english')))
+#Strip whitespace
+corpus = tm_map(corpus, FUN=stripWhitespace)
+
+#Create a dictionary
+dict = findFreqTerms(DocumentTermMatrix(Corpus(VectorSource(overview.all$overview))),lowfreq = 0)
+dict_corpus = Corpus(VectorSource(dict))
+
+#Stem document
+corpus = tm_map(corpus,FUN = stemDocument)
+#Create a document term matrix:
+dtm = DocumentTermMatrix(corpus)
+
+#Each review is represented as a document in the document term matrix. 
+#Let's see how many times the word 'crime' appears in this review.
+inspect(dtm[1094,'crime'])
+
+```
+
+Our matrix is very sparse. We want to remove Sparse Term.
+Remove sparse term:
+```{r}
+xdtm = removeSparseTerms(dtm, sparse=0.95)
+```
+
+Complete Stems
+```{r}
+xdtm = as.data.frame(as.matrix(xdtm))
+colnames(xdtm) = stemCompletion(x = colnames(xdtm),dictionary = dict_corpus,type='prevalent')
+colnames(xdtm) = make.names(colnames(xdtm))
+```
+
+Browse tokens
+```{r}
+sort(colSums(xdtm),decreasing = T)
+```
+
+Document Term Matrix-tfidf
+```{r}
+dtm_tfidf = DocumentTermMatrix(x=corpus,control = list(weighting=function(x) weightTfIdf(x,normalize=F)))
+xdtm_tfidf = removeSparseTerms(dtm_tfidf,sparse = 0.95)
+xdtm_tfidf = as.data.frame(as.matrix(xdtm_tfidf))
+colnames(xdtm_tfidf) = stemCompletion(x = colnames(xdtm_tfidf),dictionary = dict_corpus,type='prevalent')
+colnames(xdtm_tfidf) = make.names(colnames(xdtm_tfidf))
+sort(colSums(xdtm_tfidf),decreasing = T)
+```
+
+Combine xdtm_tfidf with our train data and test data:
+```{r}
+train = cbind(train,xdtm_tfidf[1:3000,])
+test = cbind(test,xdtm_tfidf[3001:7398,])
+```
+
+
+
+I didn't drop any columns during these parts so that you can decide which variables you want to use in your model.
+```{r, eval= FALSE}
+write.csv(train,file="train_clean2.csv")
+write.csv(test,file="test_clean2.csv")
+```
+
+reload 
+```{r}
+train<- read.csv("train_clean2.csv", stringsAsFactors = FALSE, na.strings = c("","#N/A","[]"))
+test<- read.csv("test_clean2.csv", stringsAsFactors = FALSE, na.strings = c("","#N/A","[]"))
+```
+
+# More EDA
+The relationship between genres and revenue:
+```{r}
+#create a new data frame which contains the average revenue of each movie genre.
+genre_mean=data.frame(matrix(ncol=2,nrow=0))
+x=c("genre","mean.revenue")
+colnames(genre_mean)=x
+for (i in 20:30){
+  gerne.mean=mean(train$revenue[train[i]==1])
+  gerne=colnames(train[i])
+  y=data.frame(gerne,gerne.mean)
+  names(y)=x
+  genre_mean=rbind(genre_mean,y)
+}
+
+genre_mean1=data.frame(matrix(ncol=2,nrow=0))
+colnames(genre_mean)=x
+for (i in 31:39){
+  gerne.mean=mean(train$revenue[train[i]==1])
+  gerne=colnames(train[i])
+  y=data.frame(gerne,gerne.mean)
+  names(y)=x
+  genre_mean1=rbind(genre_mean1,y)
+}
+
+ggplot(data=genre_mean, aes(x = genre,
+             y = mean.revenue, fill=genre)) +
+  geom_bar(stat = "identity") +
+  theme_light() +
+  ylim(0,200000000)+
+  ylab("Average Revenue")
+ggplot(data=genre_mean1, aes(x = genre,
+             y = mean.revenue, fill=genre)) +
+  geom_bar(stat = "identity") +
+  theme_light() +
+  ylim(0,200000000)+
+  ylab("Average Revenue")
+
+```
+
+The relationship between release date and revenue:
+```{r}
+#release month
+ggplot(data=train, aes(x = factor(train$month),
+             y = revenue,
+             stat = "summary", fun.y = "mean")) +
+  geom_bar(stat = "identity")+
+  theme_light() +
+  ylab("Average Revenue")
+
+#release week_day
+ggplot(data=train, aes(x = factor(train$week_day),
+             y = revenue,
+             stat = "summary", fun.y = "mean")) +
+  geom_bar(stat = "identity")+
+  theme_light() +
+  ylab("Average Revenue")
+```
+
+The relationship between production company and revenue:
+```{r}
+#create a new data frame which contains the average revenue of each movie producing company.
+company_mean=data.frame(matrix(ncol=2,nrow=0))
+x=c("company","mean.revenue")
+colnames(genre_mean)=x
+for (i in 43:53){
+  company.mean=mean(train$revenue[train[i]==1])
+  company=colnames(train[i])
+  y=data.frame(company,company.mean)
+  names(y)=x
+  company_mean=rbind(company_mean,y)
+}
+
+#"Metro.Goldwyn.Mayer..MGM." 
+ggplot(data=company_mean, aes(x = company,
+             y = mean.revenue, fill=company)) +
+  geom_bar(stat = "identity") +
+  theme_light() +
+  ylab("Average Revenue")
+```
+
+The relationship between whether belongs to a collection and revenue:
+```{r}
+ggplot(data=train, aes(x = factor(train$belongs_to_collection),
+             y = revenue,
+             stat = "summary", fun.y = "mean")) +
+  geom_bar(stat = "identity")+
+  theme_light() +
+  ylab("Average Revenue")
+```
